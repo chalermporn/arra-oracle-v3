@@ -47,6 +47,9 @@ export function createIndexerConfig(repoRoot: string): IndexerConfig {
       security_corpus: process.env.ORACLE_INDEX_SECURITY_CORPUS === '1'
         ? 'ψ/learn/security-corpus'
         : undefined,
+      // AI-maintained synthesis pages. ON by default (small, high-signal).
+      // Set ORACLE_INDEX_WIKI=0 to skip.
+      wiki: process.env.ORACLE_INDEX_WIKI === '0' ? undefined : 'ψ/wiki',
     },
   };
 }
