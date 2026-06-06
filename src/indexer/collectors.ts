@@ -6,7 +6,11 @@ import fs from 'fs';
 import path from 'path';
 import type { OracleDocument, IndexerConfig } from '../types.ts';
 import { parseResonanceFile, parseLearningFile, parseRetroFile, parseSecurityCorpusFile } from './parser.ts';
+import { parseWikiFile } from './parser-wiki.ts';
 import { discoverProjectPsiDirs } from './discovery.ts';
+
+/** Navigation files in ψ/wiki/ that are catalogs, not knowledge — never indexed. */
+const WIKI_SKIP_FILES = ['index.md', 'log.md'];
 
 const SECURITY_CORPUS_EXTENSIONS = ['.md', '.txt', '.yaml', '.yml', '.json', '.rst'];
 const SECURITY_CORPUS_MAX_FILE_BYTES = 200 * 1024;  // 200KB cap per file
@@ -82,6 +86,45 @@ export function collectDocuments(opts: CollectOpts): OracleDocument[] {
   }
 
   console.log(`Indexed ${documents.length} ${label} documents from ${totalFiles} files (skipped ${skippedDupes} duplicate files)`);
+  return documents;
+}
+
+/**
+ * Collect wiki documents from ψ/wiki/ (AI-maintained synthesis pages).
+ * OPT-IN: only runs when config.sourcePaths.wiki is set.
+ * Skips navigation files (index.md, log.md). source clips in ψ/sources/ are
+ * intentionally NOT indexed — they stay browse-only raw material.
+ */
+export function collectWiki(opts: {
+  config: IndexerConfig;
+  seenContentHashes: Set<string>;
+}): OracleDocument[] {
+  const { config, seenContentHashes } = opts;
+  const documents: OracleDocument[] = [];
+
+  const subPath = config.sourcePaths.wiki;
+  if (!subPath) return documents;
+
+  const sourcePath = path.join(config.repoRoot, subPath);
+  if (!fs.existsSync(sourcePath)) {
+    console.log(`Skipping wiki: ${sourcePath} not found`);
+    return documents;
+  }
+
+  const files = getAllMarkdownFiles(sourcePath)
+    .filter(f => !WIKI_SKIP_FILES.includes(path.basename(f)));
+  let skippedDupes = 0;
+  for (const filePath of files) {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (!content.trim()) continue;
+    const contentHash = Bun.hash(content).toString(36);
+    if (seenContentHashes.has(contentHash)) { skippedDupes++; continue; }
+    seenContentHashes.add(contentHash);
+    const relPath = path.relative(config.repoRoot, filePath);
+    documents.push(...parseWikiFile(relPath, content, relPath));
+  }
+
+  console.log(`Indexed ${documents.length} wiki documents from ${files.length} files (skipped ${skippedDupes} duplicates)`);
   return documents;
 }
 
