@@ -20,6 +20,8 @@ export interface VectorCollectionConfig {
   collection: string;
   model: string;
   provider: EmbeddingProviderType;
+  /** Embedding endpoint override (e.g. http://localhost:8000 for vllm-mlx) */
+  baseUrl?: string;
   adapter?: VectorDBType;
   dataPath?: string;
   pythonVersion?: string;
@@ -45,6 +47,8 @@ export interface VectorModelRegistryEntry {
   dataPath?: string;
   adapter?: VectorDBType;
   provider?: EmbeddingProviderType;
+  /** Embedding endpoint override (e.g. http://localhost:8000 for vllm-mlx) */
+  baseUrl?: string;
   pythonVersion?: string;
   qdrantUrl?: string;
   qdrantApiKey?: string;
@@ -133,6 +137,7 @@ export function configToModels(
       model: col.model,
       adapter: col.adapter,
       provider: col.provider,
+      baseUrl: col.baseUrl,
       dataPath: col.dataPath || config.dataPath || undefined,
       pythonVersion: col.pythonVersion,
       qdrantUrl: col.qdrantUrl,

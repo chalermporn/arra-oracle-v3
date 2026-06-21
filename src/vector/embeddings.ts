@@ -62,33 +62,7 @@ export class OllamaEmbeddings implements EmbeddingProvider {
     const embeddings: number[][] = [];
 
     for (const text of texts) {
-      // Truncate to ~2000 chars — Thai text uses 2-3x more tokens than English
-      let truncated = text.length > 2000 ? text.slice(0, 2000) : text;
-
-      // Instruction prefixes per model family. Wrong protocol = silent
-      // 5–30pt cross-language recall regression (observed on qwen3:4b).
-      //
-      //   - bge-v1.5 / multilingual-e5 → "query: ..." / "passage: ..."
-      //     (bge-m3 doesn't strictly require it but tolerates it)
-      //   - qwen3-embedding → "Instruct: <task>\nQuery: <q>" on QUERIES ONLY
-      //     passages stay raw. https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
-      const isQwen3 = this.model.includes('qwen3-embedding');
-      const isE5 = this.model.includes('multilingual-e5') || this.model.includes('/e5-');
-      const isBge = this.model.includes('bge');
-
-      if (type === 'query') {
-        if (isQwen3) {
-          truncated = `Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ${truncated}`;
-        } else if (isBge || isE5) {
-          truncated = `query: ${truncated}`;
-        }
-      } else if (type === 'passage') {
-        if (isBge || isE5) {
-          truncated = `passage: ${truncated}`;
-        }
-        // qwen3-embedding: passages stay raw per HF model card
-      }
-
+      const truncated = applyInstructionPrefix(this.model, text, type);
       const data = await this.embedOneWithRetry(truncated);
       embeddings.push(data.embedding);
 
@@ -131,6 +105,41 @@ export class OllamaEmbeddings implements EmbeddingProvider {
       cause: lastError,
     });
   }
+}
+
+/**
+ * Instruction prefixes per model family. Wrong protocol = silent
+ * 5–30pt cross-language recall regression (observed on qwen3:4b).
+ *
+ *   - bge-v1.5 / multilingual-e5 → "query: ..." / "passage: ..."
+ *     (bge-m3 doesn't strictly require it but tolerates it)
+ *   - qwen3-embedding → "Instruct: <task>\nQuery: <q>" on QUERIES ONLY
+ *     passages stay raw. https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
+ *
+ * Shared by every provider so index-time and query-time protocol always match.
+ * Also truncates to ~2000 chars — Thai text uses 2-3x more tokens than English.
+ */
+function applyInstructionPrefix(model: string, text: string, type?: EmbedType): string {
+  let truncated = text.length > 2000 ? text.slice(0, 2000) : text;
+
+  const isQwen3 = model.includes('qwen3-embedding');
+  const isE5 = model.includes('multilingual-e5') || model.includes('/e5-');
+  const isBge = model.includes('bge');
+
+  if (type === 'query') {
+    if (isQwen3) {
+      truncated = `Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ${truncated}`;
+    } else if (isBge || isE5) {
+      truncated = `query: ${truncated}`;
+    }
+  } else if (type === 'passage') {
+    if (isBge || isE5) {
+      truncated = `passage: ${truncated}`;
+    }
+    // qwen3-embedding: passages stay raw per HF model card
+  }
+
+  return truncated;
 }
 
 function positiveInt(raw: string | undefined, fallback: number): number {
@@ -188,17 +197,100 @@ export class OpenAIEmbeddings implements EmbeddingProvider {
 }
 
 /**
+ * OpenAI-compatible local embeddings (vllm-mlx, LM Studio, llama.cpp server, ...).
+ * Same wire format as OpenAI /v1/embeddings but pointed at a local base URL.
+ * Applies the same instruction-prefix protocol as OllamaEmbeddings so
+ * index-time and query-time embeddings stay consistent.
+ */
+export class OpenAICompatibleEmbeddings implements EmbeddingProvider {
+  readonly name = 'openai-compatible';
+  dimensions: number;
+  private baseUrl: string;
+  private model: string;
+  private _dimensionsDetected = false;
+  private attempts: number;
+  private retryDelayMs: number;
+
+  constructor(config: { baseUrl?: string; model?: string } = {}) {
+    this.baseUrl = (config.baseUrl
+      || process.env.ORACLE_OPENAI_COMPAT_BASE_URL
+      || 'http://localhost:8000').replace(/\/$/, '');
+    this.model = config.model || 'mlx-community/bge-m3-mlx-fp16';
+    this.attempts = positiveInt(process.env.ORACLE_EMBED_ATTEMPTS, 3);
+    this.retryDelayMs = positiveInt(process.env.ORACLE_EMBED_RETRY_DELAY_MS, 150);
+    const KNOWN_DIMS: Record<string, number> = {
+      'mlx-community/bge-m3-mlx-fp16': 1024,
+      'mlx-community/bge-m3-mlx-8bit': 1024,
+      'mlx-community/bge-m3-mlx-4bit': 1024,
+    };
+    this.dimensions = KNOWN_DIMS[this.model] || 1024;
+  }
+
+  async embed(texts: string[], type?: EmbedType): Promise<number[][]> {
+    const prefixed = texts.map(t => applyInstructionPrefix(this.model, t, type));
+    const data = await this.embedBatchWithRetry(prefixed);
+
+    if (!this._dimensionsDetected && data.length > 0 && data[0].length > 0) {
+      this.dimensions = data[0].length;
+      this._dimensionsDetected = true;
+    }
+
+    return data;
+  }
+
+  private async embedBatchWithRetry(input: string[]): Promise<number[][]> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.attempts; attempt++) {
+      try {
+        const response = await fetch(`${this.baseUrl}/v1/embeddings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: this.model, input }),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`OpenAI-compatible API error (${response.status}): ${error}`);
+        }
+
+        const data = await response.json() as {
+          data: { embedding: number[]; index: number }[];
+        };
+
+        return data.data
+          .sort((a, b) => a.index - b.index)
+          .map(d => d.embedding);
+      } catch (err) {
+        lastError = err;
+        if (attempt < this.attempts) {
+          await sleep(this.retryDelayMs * attempt);
+        }
+      }
+    }
+
+    const message = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(
+      `OpenAI-compatible embedding failed after ${this.attempts} attempts (${this.baseUrl}): ${message}`,
+      { cause: lastError },
+    );
+  }
+}
+
+/**
  * Create embedding provider from type string
  */
 export function createEmbeddingProvider(
   type: EmbeddingProviderType = 'chromadb-internal',
-  model?: string
+  model?: string,
+  opts: { baseUrl?: string } = {}
 ): EmbeddingProvider {
   switch (type) {
     case 'ollama':
-      return new OllamaEmbeddings({ model });
+      return new OllamaEmbeddings({ model, baseUrl: opts.baseUrl });
     case 'openai':
       return new OpenAIEmbeddings({ model });
+    case 'openai-compatible':
+      return new OpenAICompatibleEmbeddings({ model, baseUrl: opts.baseUrl });
     case 'cloudflare-ai': {
       // Dynamic import to avoid requiring CF credentials when not used
       const { CloudflareAIEmbeddings } = require('./adapters/cloudflare-vectorize.ts');

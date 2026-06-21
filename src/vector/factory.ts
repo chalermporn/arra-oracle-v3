@@ -25,6 +25,8 @@ export interface VectorStoreConfig {
   pythonVersion?: string;
   embeddingProvider?: EmbeddingProviderType;
   embeddingModel?: string;
+  /** Embedding endpoint override (e.g. http://localhost:8000 for vllm-mlx) */
+  embeddingBaseUrl?: string;
   /** Qdrant URL (default: http://localhost:6333) */
   qdrantUrl?: string;
   /** Qdrant API key */
@@ -66,7 +68,7 @@ export function createVectorStore(config: VectorStoreConfig = {}): VectorStoreAd
       const embeddingModel = config.embeddingModel
         || process.env.ORACLE_EMBEDDING_MODEL;
 
-      const embedder = createEmbeddingProvider(embeddingType, embeddingModel);
+      const embedder = createEmbeddingProvider(embeddingType, embeddingModel, { baseUrl: config.embeddingBaseUrl });
       return new SqliteVecAdapter(collectionName, dbPath, embedder);
     }
 
@@ -82,7 +84,7 @@ export function createVectorStore(config: VectorStoreConfig = {}): VectorStoreAd
       const embeddingModel = config.embeddingModel
         || process.env.ORACLE_EMBEDDING_MODEL;
 
-      const embedder = createEmbeddingProvider(embeddingType, embeddingModel);
+      const embedder = createEmbeddingProvider(embeddingType, embeddingModel, { baseUrl: config.embeddingBaseUrl });
       return new LanceDBAdapter(collectionName, dbPath, embedder);
     }
 
@@ -94,7 +96,7 @@ export function createVectorStore(config: VectorStoreConfig = {}): VectorStoreAd
       const embeddingModel = config.embeddingModel
         || process.env.ORACLE_EMBEDDING_MODEL;
 
-      const embedder = createEmbeddingProvider(embeddingType, embeddingModel);
+      const embedder = createEmbeddingProvider(embeddingType, embeddingModel, { baseUrl: config.embeddingBaseUrl });
       return new QdrantAdapter(collectionName, embedder, {
         url: config.qdrantUrl || process.env.QDRANT_URL,
         apiKey: config.qdrantApiKey || process.env.QDRANT_API_KEY,
@@ -156,9 +158,10 @@ export function getEmbeddingModels(): Record<string, VectorModelRegistryEntry> {
     'bge-m3': {
       adapter: 'lancedb',
       collection: 'oracle_knowledge_bge_m3',
-      model: 'bge-m3',
+      model: 'mlx-community/bge-m3-mlx-fp16',
       dataPath: LANCEDB_DIR,
-      provider: 'ollama',
+      provider: 'openai-compatible',
+      baseUrl: 'http://localhost:8000',
     },
   };
 }
@@ -192,6 +195,7 @@ export function getVectorStoreConfigByModel(model?: string): VectorStoreConfig {
     collectionName: preset.collection,
     embeddingProvider: preset.provider || 'ollama',
     embeddingModel: preset.model,
+    ...(preset.baseUrl && { embeddingBaseUrl: preset.baseUrl }),
     ...(preset.dataPath && { dataPath: preset.dataPath }),
     ...(preset.pythonVersion && { pythonVersion: preset.pythonVersion }),
     ...(preset.qdrantUrl && { qdrantUrl: preset.qdrantUrl }),

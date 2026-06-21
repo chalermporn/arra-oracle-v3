@@ -42,8 +42,9 @@ async function main() {
   const store = createVectorStore({
     type: 'lancedb',
     collectionName: preset.collection,
-    embeddingProvider: 'ollama',
+    embeddingProvider: preset.provider || 'ollama',
     embeddingModel: preset.model,
+    ...(preset.baseUrl && { embeddingBaseUrl: preset.baseUrl }),
     ...(preset.dataPath && { dataPath: preset.dataPath }),
   });
 
